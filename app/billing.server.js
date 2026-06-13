@@ -45,7 +45,7 @@ const CANCEL_MUTATION = `#graphql
     }
   }`;
 
-const FALLBACK_APP_HANDLE = "imagegenie-1";
+const FALLBACK_APP_HANDLE = "imagegenie";
 
 // Reads the app's handle + active subscription in a single round trip.
 // Returns { appHandle, activeSubscription, hasActivePlan }.
