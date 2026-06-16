@@ -254,16 +254,26 @@ export async function action({ request }) {
             const suggestion = await generateAIAltText(image.url, image.productTitle, aiProvider);
             return { id: image.id, suggestedAlt: suggestion.altText, seoScore: suggestion.seoScore };
           } catch (error) {
+            // The AI call failed (bad/expired key, no quota, image unreachable…).
+            // Log it AND tag the row so the UI can warn the merchant instead of
+            // silently passing off the truncated product title as an "AI" result.
+            console.error(`AI alt text failed for image ${image.id} via ${aiProvider}: ${error.message}`);
             return {
               id: image.id,
               suggestedAlt: generateSmartFallback(image.productTitle, image.url),
-              seoScore: 70
+              seoScore: 70,
+              usedFallback: true,
+              aiError: error.message
             };
           }
         })
       );
 
-      return { success: true, kind: 'suggestions', suggestions };
+      // If every image fell back, the provider is down/misconfigured — surface
+      // the real reason so the merchant knows to fix their API key, not retry.
+      const aiError = suggestions.find(s => s.aiError)?.aiError || null;
+      const fallbackCount = suggestions.filter(s => s.usedFallback).length;
+      return { success: true, kind: 'suggestions', suggestions, aiError, fallbackCount };
     } catch (error) {
       return { success: false, kind: 'suggestions', error: 'Failed to generate AI suggestions: ' + error.message };
     }
@@ -500,10 +510,16 @@ export default function AltTextSuggestions() {
         prev.map(img => {
           const suggestion = data.suggestions.find(s => s.id === img.id);
           return suggestion
-            ? { ...img, suggestedAlt: suggestion.suggestedAlt, seoScore: suggestion.seoScore }
+            ? { ...img, suggestedAlt: suggestion.suggestedAlt, seoScore: suggestion.seoScore, usedFallback: !!suggestion.usedFallback }
             : img;
         })
       );
+      // Warn the merchant when the AI provider failed — otherwise the fallback
+      // (the truncated product title) looks identical to the original and the
+      // failure is invisible.
+      if (data.aiError) {
+        setError(`AI generation failed — showing fallback text (your product title), not a real AI description. Reason: ${data.aiError}. Check your AI provider API key/credits in the app settings.`);
+      }
       setGenProgress(prev => prev ? { ...prev, done: Math.min(prev.total, prev.done + data.suggestions.length) } : prev);
     } else if (data.error) {
       setError(data.error);
