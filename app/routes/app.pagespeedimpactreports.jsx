@@ -77,9 +77,25 @@ async function runPageSpeedTest(url) {
     const keyParam = apiKey ? `&key=${apiKey}` : '';
     const apiUrl = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&category=performance&strategy=mobile${keyParam}`;
 
-    const response = await fetch(apiUrl);
+    // PSI tests a live page on Google's servers and routinely takes 30–60s.
+    // Cap it so a hung request can't stall the action indefinitely.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 55000);
+    let response;
+    try {
+      response = await fetch(apiUrl, { signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
     if (!response.ok) {
-      throw new Error('PageSpeed API request failed');
+      // Surface Google's actual reason (unreachable URL, rate limit, etc.)
+      // instead of a generic failure, so the merchant can act on it.
+      let detail = '';
+      try {
+        const errBody = await response.json();
+        detail = errBody?.error?.message || '';
+      } catch { /* non-JSON error body */ }
+      throw new Error(`PageSpeed API request failed (${response.status})${detail ? `: ${detail}` : ''}`);
     }
 
     const data = await response.json();
@@ -154,7 +170,10 @@ export async function loader({ request }) {
     const products = await getAllProductHandles(admin);
 
     const shop = session.shop;
-    const shopUrl = `https://${shop.replace('.myshopify.com', '')}`;
+    // Use the full myshopify domain — stripping ".myshopify.com" produced an
+    // invalid host (e.g. "https://mystore") that PageSpeed could never load.
+    // The myshopify URL is publicly reachable and redirects to the primary domain.
+    const shopUrl = `https://${shop}`;
 
     const pages = [];
 
@@ -286,9 +305,10 @@ export async function action({ request }) {
       };
     } catch (error) {
       console.error('Error running PageSpeed analysis:', error);
+      const detail = error?.message ? ` (${error.message})` : '';
       return {
         success: false,
-        error: 'Failed to run the PageSpeed test. This could be due to API rate limits or the page being inaccessible. Please try again in a few minutes.'
+        error: `Failed to run the PageSpeed test on ${pageUrl}${detail}. Common causes: the store/page is password-protected or unpublished (Google can't load it), the product page URL isn't public yet, or API rate limits. Make sure the page opens in an incognito window, then try again.`
       };
     }
   }

@@ -195,6 +195,11 @@ export async function action({ request }) {
         { variables: { files: chunk } }
       );
       const result = await response.json();
+      // Top-level GraphQL errors (throttling, auth, bad field) leave `data` null.
+      // Without this check those failures fall through as a false success.
+      if (result.errors?.length) {
+        return result.errors[0].message || 'Shopify rejected the alt text update.';
+      }
       const err = result.data?.fileUpdate?.userErrors?.[0];
       if (err) return err.message;
     }
