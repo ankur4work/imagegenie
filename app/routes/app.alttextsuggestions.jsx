@@ -115,9 +115,10 @@ export async function loader({ request }) {
 
   try {
     // Page through the whole catalog (metadata only, so this stays fast).
-    // Alt text is generated ONCE per product (from its main image) and applied
-    // to ALL of that product's images, so each row here is a PRODUCT, carrying
-    // every image id so a single caption can be written to all of them.
+    // Each row here is a single IMAGE: alt text is generated PER IMAGE from that
+    // image's own URL and applied to just that image, so a multi-colour product
+    // gets an accurate caption for every variant photo (pink image -> "pink…",
+    // grey image -> "grey…") instead of one shared caption for all.
     const rows = [];
     let cursor = null;
     let hasNextPage = true;
@@ -137,22 +138,26 @@ export async function loader({ request }) {
           .map(n => ({ id: n.id, url: n.image.url, alt: n.alt || '' }));
         if (productImages.length === 0) return; // nothing to caption
 
-        // Use the merchandising "main" image for the thumbnail + AI input,
-        // falling back to the first media image.
-        const main = productImages.find(i => i.url === product.featuredImage?.url) || productImages[0];
-        const currentAlt = product.featuredImage?.altText || main.alt || '';
+        const featuredUrl = product.featuredImage?.url;
+        productImages.forEach((img, idx) => {
+          // The featured image's alt comes through product.featuredImage.altText;
+          // every other image carries its own MediaImage.alt.
+          const currentAlt = (img.url === featuredUrl
+            ? (product.featuredImage?.altText || img.alt)
+            : img.alt) || '';
 
-        rows.push({
-          id: product.id,                       // row id = product id
-          productId: product.id,
-          productTitle: product.title,
-          url: main.url,                        // main image (thumbnail + AI)
-          imageIds: productImages.map(i => i.id), // apply caption to ALL of these
-          imageCount: productImages.length,
-          currentAlt,
-          suggestedAlt: '',
-          seoScore: calculateSeoScore(currentAlt),
-          status: 'pending'
+          rows.push({
+            id: img.id,                  // row id = image id (unique per image)
+            productId: product.id,
+            productTitle: product.title,
+            imageIndex: idx + 1,         // 1-based position within the product
+            url: img.url,                // THIS image (thumbnail + AI input)
+            imageIds: [img.id],          // apply caption to just this image
+            currentAlt,
+            suggestedAlt: '',
+            seoScore: calculateSeoScore(currentAlt),
+            status: 'pending'
+          });
         });
       });
 
@@ -206,7 +211,7 @@ export async function action({ request }) {
     return null;
   }
 
-  // Apply a single product's caption to every image of that product.
+  // Apply one image's caption to that image.
   if (actionType === 'applyAltText') {
     const imageIds = JSON.parse(formData.get('imageIds') || '[]');
     const altText = formData.get('altText');
@@ -215,14 +220,14 @@ export async function action({ request }) {
       const files = imageIds.map(id => ({ id, alt: altText }));
       const errMsg = await writeAltToFiles(files);
       if (errMsg) return { success: false, error: errMsg };
-      return { success: true, message: 'Alt text applied to all images of the product!' };
+      return { success: true, message: 'Alt text applied to the image!' };
     } catch (error) {
       console.error('Error updating image:', error);
       return { success: false, error: 'Failed to update image alt text: ' + error.message };
     }
   }
 
-  // Bulk apply: each update is a product's caption + all of its image ids.
+  // Bulk apply: each update is one image's caption + its image id.
   // Flatten to a flat files list (one entry per image) and write chunked.
   if (actionType === 'applyBulk') {
     const updates = JSON.parse(formData.get('updates')); // [{ imageIds, altText }]
@@ -233,7 +238,7 @@ export async function action({ request }) {
       );
       const errMsg = await writeAltToFiles(files);
       if (errMsg) return { success: false, error: errMsg };
-      return { success: true, message: `Applied captions to ${updates.length} products (${files.length} images)` };
+      return { success: true, message: `Applied captions to ${files.length} images` };
     } catch (error) {
       console.error('Error in bulk update:', error);
       return { success: false, error: 'Failed to update some images: ' + error.message };
@@ -554,16 +559,16 @@ export default function AltTextSuggestions() {
   const generateSuggestions = useCallback(() => {
     if (isGenerating) return;
     setError(null);
-    // If the user checked specific products, only generate for those; otherwise
-    // generate one caption for every pending product. One API call per product.
+    // If the user checked specific images, only generate for those; otherwise
+    // generate a caption for every pending image. One API call per image.
     const needsSuggestion = (img) => img.status === 'pending' && !img.suggestedAlt;
     const pendingImages = selectedImages.length > 0
       ? images.filter(img => selectedImages.includes(img.id) && needsSuggestion(img))
       : images.filter(needsSuggestion);
     if (pendingImages.length === 0) {
       setError(selectedImages.length > 0
-        ? 'Selected products already have suggestions (or are already applied).'
-        : 'All products already have suggestions. Clear existing suggestions to regenerate.');
+        ? 'Selected images already have suggestions (or are already applied).'
+        : 'All images already have suggestions. Clear existing suggestions to regenerate.');
       return;
     }
     // Split into small batches the client feeds to the server one at a time, so
@@ -614,7 +619,7 @@ export default function AltTextSuggestions() {
       .filter(Boolean);
 
     if (updates.length === 0) {
-      setError('Please generate suggestions for selected products first');
+      setError('Please generate suggestions for selected images first');
       return;
     }
     const formData = new FormData();
@@ -642,15 +647,14 @@ export default function AltTextSuggestions() {
 
   const aiProviderOptions = [
     { label: 'OpenAI GPT-4o-mini (Recommended)', value: 'openai' },
-    { label: 'Anthropic Claude 3.5 Haiku', value: 'anthropic' },
     { label: 'Smart Fallback (No API)', value: 'fallback' }
   ];
 
-  // Each row is a PRODUCT (one caption per product, applied to all its images).
+  // Each row is a single IMAGE (one caption per image, applied to that image).
   const pendingCount = images.filter(img => img.status === 'pending').length;
   const appliedCount = images.filter(img => img.status === 'applied').length;
-  const productCount = images.length;
-  const totalImages = images.reduce((sum, img) => sum + (img.imageCount || 0), 0);
+  const productCount = new Set(images.map(img => img.productId)).size;
+  const totalImages = images.length;
 
   // Keep the current page valid as the image count changes (e.g. after a load).
   const pageCount = Math.max(1, Math.ceil(images.length / PAGE_SIZE));
@@ -666,7 +670,7 @@ export default function AltTextSuggestions() {
   return (
     <Page
       title="ImageGenie — AI Alt Text Generator"
-      subtitle="One AI caption per product, applied to all its images — saves API usage"
+      subtitle="A unique AI caption for every image — accurate for each colour and variant"
     >
       <Layout>
         <Layout.Section>
@@ -674,7 +678,7 @@ export default function AltTextSuggestions() {
             <span className="pb-page-header-icon">✨</span>
             <div>
               <p className="pb-page-header-title">AI Alt Text Generator</p>
-              <p className="pb-page-header-sub">Powered by OpenAI GPT-4o-mini &amp; Anthropic Claude</p>
+              <p className="pb-page-header-sub">Powered by OpenAI GPT-4o-mini — one caption per image</p>
             </div>
           </div>
         </Layout.Section>
@@ -697,7 +701,7 @@ export default function AltTextSuggestions() {
         {truncated && (
           <Layout.Section>
             <Banner tone="info">
-              Showing the first {images.length} products. This store has a very large catalog,
+              Showing the first {images.length} images. This store has a very large catalog,
               so caption these and reload to continue with the rest.
             </Banner>
           </Layout.Section>
@@ -777,7 +781,7 @@ export default function AltTextSuggestions() {
                 {images.length === 0 ? (
                   <Box padding="1600">
                     <BlockStack gap="400" inlineAlign="center">
-                      <Text variant="headingMd" as="h3" alignment="center">No products found</Text>
+                      <Text variant="headingMd" as="h3" alignment="center">No images found</Text>
                       <Text variant="bodyMd" as="p" tone="subdued" alignment="center">
                         Add products with images to get started.
                       </Text>
@@ -797,7 +801,7 @@ export default function AltTextSuggestions() {
                           <BlockStack gap="400">
                             <InlineStack gap="200" blockAlign="center">
                               <Text variant="headingSm" as="h4">{image.productTitle}</Text>
-                              <Badge tone="info">{`${image.imageCount} ${image.imageCount === 1 ? 'image' : 'images'}`}</Badge>
+                              <Badge tone="info">{`Image ${image.imageIndex}`}</Badge>
                             </InlineStack>
 
                             <InlineStack align="space-between">
@@ -820,7 +824,7 @@ export default function AltTextSuggestions() {
                             <BlockStack gap="300">
                               <InlineStack gap="200" blockAlign="center">
                                 <Text variant="bodySm" as="p" fontWeight="semibold">AI Suggested Alt Text</Text>
-                                <Text variant="bodySm" as="span" tone="subdued">(applied to all {image.imageCount} images)</Text>
+                                <Text variant="bodySm" as="span" tone="subdued">(for this image)</Text>
                                 {image.status === 'applied' && <Badge tone="success">Applied</Badge>}
                               </InlineStack>
                               <TextField
@@ -858,7 +862,7 @@ export default function AltTextSuggestions() {
                     onPrevious={() => setPage(p => Math.max(0, p - 1))}
                     hasNext={safePage < pageCount - 1}
                     onNext={() => setPage(p => Math.min(pageCount - 1, p + 1))}
-                    label={`${rangeStart}–${rangeEnd} of ${images.length} products`}
+                    label={`${rangeStart}–${rangeEnd} of ${images.length} images`}
                   />
                 </InlineStack>
               )}
