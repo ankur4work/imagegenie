@@ -355,38 +355,34 @@ async function uploadAndReplaceImage(admin, productId, originalMediaId, optimize
 }
 
 async function generateAIAltText(imageUrl, productTitle) {
-  if (!process.env.ANTHROPIC_API_KEY) return `${productTitle} - product image`;
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return `${productTitle} - product image`;
   try {
-    const imageResponse = await timedFetch(imageUrl, {}, 20000);
-    if (!imageResponse.ok) throw new Error('Failed to fetch image');
-    const base64Image = Buffer.from(await imageResponse.arrayBuffer()).toString('base64');
-    let mediaType = 'image/jpeg';
-    if (imageUrl.toLowerCase().includes('.png')) mediaType = 'image/png';
-    if (imageUrl.toLowerCase().includes('.webp')) mediaType = 'image/webp';
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    // OpenAI vision fetches the image URL itself, so no base64 download needed.
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
+        'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: 'claude-3-5-sonnet-20241022',
+        model: 'gpt-4o-mini',
         max_tokens: 150,
+        temperature: 0.4,
         messages: [{
           role: 'user',
           content: [
-            { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Image } },
-            { type: 'text', text: `Generate SEO-optimized alt text for this ${productTitle} image. Include: product type, color, material, style. Keep under 125 characters. Return only the alt text.` },
+            { type: 'text', text: `Generate SEO-optimized alt text for this ${productTitle} image. Include: product type, color, material, style. Describe what you actually see. Keep under 125 characters. Don't use "image of". Return only the alt text.` },
+            { type: 'image_url', image_url: { url: imageUrl } },
           ],
         }],
       }),
     });
+    if (!response.ok) throw new Error(`OpenAI API error ${response.status}`);
     const result = await response.json();
-    let altText = result.content[0].text.trim().replace(/^["']|["']$/g, '').replace(/\n/g, ' ');
+    let altText = (result.choices?.[0]?.message?.content || '').trim().replace(/^["']|["']$/g, '').replace(/\n/g, ' ');
     if (altText.length > 125) altText = altText.substring(0, 122) + '...';
-    return altText;
+    return altText || `${productTitle} - product image`;
   } catch (error) {
     console.error('Error generating AI alt text:', error);
     return `${productTitle} - product image`;
